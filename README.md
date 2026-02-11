@@ -60,7 +60,9 @@ Add a file named `local.settings.json` in the root of your project with the foll
     "IsEncrypted": false,
     "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "python"
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "LOGLEVEL_HTTPX": "INFO",
+    "LOGLEVEL_HTTPCORE": "INFO"
     }
 }
 ```
@@ -114,7 +116,85 @@ py -m venv .venv
 
 ## Source Code
 
-The source code for both functions is in the [`function_app.py`](./function_app.py) code file. Azure Functions requires the use of the `@azure/functions` library.
+The source code for both functions is in the [`function_app.py`](./function_app.py) code file, with reusable logging configuration in [`log_setup.py`](./log_setup.py).
+
+### Logging
+
+The project includes a structured logging setup (`log_setup.py`) that is initialized once at the top of `function_app.py`:
+
+```python
+from log_setup import setup_logging
+logger = setup_logging("function_app")
+```
+
+This configures the root logger with a clean format, silences noisy library loggers (Azure SDK, httpx, gRPC, etc.) to WARNING by default, and returns a ready-to-use logger.
+
+#### General environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | Root log level for your application code |
+| `LOG_FORMAT` | `%(asctime)s [%(levelname).1s] %(name)s: %(message)s` | Log format string |
+| `LOG_DATE_FORMAT` | `%H:%M:%S` | Date format string |
+
+#### Per-logger level overrides (`LOGLEVEL_`)
+
+You can override the log level of any Python logger at runtime using environment variables with the `LOGLEVEL_` prefix. The convention is:
+
+```
+LOGLEVEL_<LOGGER_NAME>=<LEVEL>
+```
+
+- **Underscores become dots** in the logger name (e.g. `AZURE_CORE` → `azure.core`)
+- **Case-insensitive** for both name and level
+- **Valid levels:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
+- **Invalid values** emit a Python warning and are skipped
+
+Examples:
+
+| Environment variable | Effect |
+|---|---|
+| `LOGLEVEL_HTTPX=INFO` | Sets `httpx` logger to INFO |
+| `LOGLEVEL_HTTPCORE=DEBUG` | Sets `httpcore` logger to DEBUG |
+| `LOGLEVEL_AZURE_CORE=WARNING` | Sets `azure.core` logger to WARNING |
+| `LOGLEVEL_AZURE_STORAGE_BLOB=ERROR` | Sets `azure.storage.blob` logger to ERROR |
+
+These overrides have the highest priority — they are applied after the built-in noisy-logger defaults, so you can always dial up verbosity for debugging and dial it back down for production.
+
+For local development, set them in `local.settings.json`:
+
+```json
+{
+    "IsEncrypted": false,
+    "Values": {
+        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+        "FUNCTIONS_WORKER_RUNTIME": "python",
+        "LOGLEVEL_HTTPX": "INFO",
+        "LOGLEVEL_HTTPCORE": "INFO"
+    }
+}
+```
+
+For Azure deployments, the same variables are configured as app settings in [`infra/main.bicep`](./infra/main.bicep).
+
+### HTTP requests with httpx
+
+The `httpget` function includes demo HTTP calls using [httpx](https://www.python-httpx.org/) to show logging at different levels:
+
+```python
+with httpx.Client(timeout=5) as client:
+    for url in urls:
+        try:
+            logger.debug("Requesting %s", url)
+            resp = client.get(url)
+            logger.info("%s → %s", url, resp.status_code)
+        except httpx.HTTPError as exc:
+            logger.warning("Request to %s failed: %s", url, exc)
+```
+
+Set `LOGLEVEL_HTTPX=DEBUG` to see detailed request/response logs from httpx itself.
+
+### Function endpoints
 
 This code shows an HTTP GET triggered function:  
 
@@ -123,7 +203,7 @@ This code shows an HTTP GET triggered function:
 def http_get(req: func.HttpRequest) -> func.HttpResponse:
     name = req.params.get("name", "World")
 
-    logging.info(f"Processing GET request. Name: {name}")
+    logger.info(f"Processing GET request. Name: {name}")
 
     return func.HttpResponse(f"Hello, {name}!")
 ```
@@ -138,7 +218,7 @@ def http_post(req: func.HttpRequest) -> func.HttpResponse:
         name = req_body.get('name')
         age = req_body.get('age')
         
-        logging.info(f"Processing POST request. Name: {name}")
+        logger.info(f"Processing POST request. Name: {name}")
 
         if name and isinstance(name, str) and age and isinstance(age, int):
             return func.HttpResponse(f"Hello, {name}! You are {age} years old!")
