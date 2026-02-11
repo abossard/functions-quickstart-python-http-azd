@@ -32,7 +32,7 @@ This source code supports the article [Quickstart: Create and deploy functions t
 Python Azure Functions use an **out-of-process worker model**. Your Python code does **not** run inside the .NET Functions host — it runs in a separate Python process that communicates with the host over a **bidirectional gRPC stream**.
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph python ["Python Worker Process"]
         A["Your Code<br>logger.info(...)"] --> B["Python<br>logging module"]
         C["httpx / requests<br>SDK internals"] --> B
