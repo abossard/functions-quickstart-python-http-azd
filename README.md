@@ -21,6 +21,140 @@ This template repository contains an HTTP trigger reference sample for Azure Fun
 
 This source code supports the article [Quickstart: Create and deploy functions to Azure Functions using the Azure Developer CLI](https://learn.microsoft.com/azure/azure-functions/create-first-function-azure-developer-cli?pivots=programming-language-python).
 
+---
+
+## Special Logging Fork
+
+> **This is a fork** of the original Azure Functions Python quickstart that adds a production-ready logging setup with per-logger environment variable overrides, demonstrates HTTP calls with both [httpx](https://www.python-httpx.org/) and [requests](https://docs.python-requests.org/), and documents how Python logging actually flows through the Azure Functions runtime.
+
+### How logging works in Azure Functions (Python)
+
+Python Azure Functions use an **out-of-process worker model**. Your Python code does **not** run inside the .NET Functions host — it runs in a separate Python process that communicates with the host over a **bidirectional gRPC stream**.
+
+```mermaid
+flowchart LR
+    subgraph python ["Python Worker Process"]
+        A["Your Code<br>logger.info(...)"] --> B["Python<br>logging module"]
+        C["httpx / requests<br>SDK internals"] --> B
+        B -->|"level filter<br>(INFO default)"| D["AsyncLoggingHandler"]
+        D -->|"maps level +<br>sets category"| E["gRPC Response Queue"]
+    end
+
+    subgraph grpc ["gRPC Channel"]
+        E -->|"StreamingMessage<br>(RpcLog)"| F["EventStream"]
+    end
+
+    subgraph dotnet [".NET Functions Host"]
+        F --> G["GrpcWorkerChannel<br>DispatchMessage()"]
+        G -->|"User log"| H["Console +<br>App Insights"]
+        G -->|"System log"| I["Platform<br>Telemetry"]
+    end
+```
+
+Here's what happens when you call `logger.info("hello")`:
+
+1. **Python `logging` module** — Your log record hits the standard Python logging pipeline. Level filtering happens here first — if a logger is set to `WARNING`, your `INFO` message is **dropped immediately** and never leaves the Python process.
+
+2. **`AsyncLoggingHandler`** — The Python worker installs its own `logging.Handler` on the root logger at startup ([source: `dispatcher.py`](https://github.com/Azure/azure-functions-python-worker/blob/main/azure_functions_worker/dispatcher.py)). This handler captures every log record that passes the level filter.
+
+3. **Level & category mapping** — The handler maps Python log levels to the gRPC `RpcLog.Level` enum (`DEBUG`→`Debug`, `INFO`→`Information`, `WARNING`→`Warning`, etc.) and classifies the log as **User** or **System** based on the logger name. Loggers named `azure_functions_worker.*` or `azure.functions.*` are System; everything else is User.
+
+4. **gRPC transport** — The `RpcLog` protobuf message is sent to the .NET host via the `FunctionRpc/EventStream` bidirectional stream.
+
+5. **.NET host routing** — The host's `GrpcWorkerChannel` dispatches the message:
+   - **User logs** → your configured `ILogger` sinks (local console, Application Insights)
+   - **System logs** → platform telemetry only (you won't see these in App Insights)
+
+### Why logging must be configured in Python
+
+Because filtering happens **before** the gRPC hop, configuring log levels in the Python code is essential:
+
+- **The Python worker sets the root logger to `INFO` by default.** Any `DEBUG` messages are discarded in the Python process — the .NET host never sees them. That's why `log_setup.py` lets you set `LOG_LEVEL=DEBUG` to change this.
+
+- **Noisy libraries flood the gRPC channel.** Libraries like the Azure SDK, httpx, and urllib3 emit verbose logs at `DEBUG`/`INFO`. Without suppressing them in Python, every single log record would be serialized to protobuf, sent over gRPC, deserialized in C#, and pushed to Application Insights — wasting CPU, network, and ingestion cost. That's why `log_setup.py` sets these to `WARNING` by default.
+
+- **Logger names determine visibility.** If you accidentally use a logger named `azure.functions.something`, your logs get classified as System logs and won't appear in your Application Insights. Using your own logger name (like `function_app`) ensures they're treated as User logs.
+
+- **`LOGLEVEL_` overrides give runtime control** without code changes — dial up `LOGLEVEL_HTTPX=DEBUG` to troubleshoot HTTP issues, then set it back to `WARNING` in production.
+
+### Logging setup
+
+The project includes a structured logging setup ([`log_setup.py`](./log_setup.py)) that is initialized once at the top of `function_app.py`:
+
+```python
+from log_setup import setup_logging
+logger = setup_logging("function_app")
+```
+
+This configures the root logger with a clean format, silences noisy library loggers (Azure SDK, httpx, gRPC, etc.) to WARNING by default, and returns a ready-to-use logger.
+
+### General environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | Root log level for your application code |
+| `LOG_FORMAT` | `%(asctime)s [%(levelname).1s] %(name)s: %(message)s` | Log format string |
+| `LOG_DATE_FORMAT` | `%H:%M:%S` | Date format string |
+
+### Per-logger level overrides (`LOGLEVEL_`)
+
+You can override the log level of any Python logger at runtime using environment variables with the `LOGLEVEL_` prefix. The convention is:
+
+```
+LOGLEVEL_<LOGGER_NAME>=<LEVEL>
+```
+
+- **Underscores become dots** in the logger name (e.g. `AZURE_CORE` → `azure.core`)
+- **Case-insensitive** for both name and level
+- **Valid levels:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
+- **Invalid values** emit a Python warning and are skipped
+
+Examples:
+
+| Environment variable | Effect |
+|---|---|
+| `LOGLEVEL_HTTPX=INFO` | Sets `httpx` logger to INFO |
+| `LOGLEVEL_REQUESTS=DEBUG` | Sets `requests` logger to DEBUG |
+| `LOGLEVEL_AZURE_CORE=WARNING` | Sets `azure.core` logger to WARNING |
+| `LOGLEVEL_AZURE_STORAGE_BLOB=ERROR` | Sets `azure.storage.blob` logger to ERROR |
+
+These overrides have the highest priority — they are applied after the built-in noisy-logger defaults, so you can always dial up verbosity for debugging and dial it back down for production.
+
+For local development, set them in `local.settings.json`:
+
+```json
+{
+    "IsEncrypted": false,
+    "Values": {
+        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+        "FUNCTIONS_WORKER_RUNTIME": "python",
+        "LOGLEVEL_HTTPX": "INFO",
+        "LOGLEVEL_REQUESTS": "INFO"
+    }
+}
+```
+
+For Azure deployments, the same variables are configured as app settings in [`infra/main.bicep`](./infra/main.bicep).
+
+### HTTP requests with httpx and requests
+
+The `httpget` function includes demo HTTP calls using both [httpx](https://www.python-httpx.org/) and [requests](https://docs.python-requests.org/) to compare logging behaviour side by side:
+
+```python
+# httpx
+with httpx.Client(timeout=5) as client:
+    resp = client.get(url)
+    logger.info("httpx  %s → %s", url, resp.status_code)
+
+# requests
+resp = requests.get(url, timeout=5)
+logger.info("requests %s → %s", url, resp.status_code)
+```
+
+Use `LOGLEVEL_HTTPX=DEBUG` or `LOGLEVEL_REQUESTS=DEBUG` to see detailed internal logs from each library.
+
+---
+
 ## Prerequisites
 
 + [Python 3.11](https://www.python.org/)
@@ -117,136 +251,6 @@ py -m venv .venv
 ## Source Code
 
 The source code for both functions is in the [`function_app.py`](./function_app.py) code file, with reusable logging configuration in [`log_setup.py`](./log_setup.py).
-
-### Logging
-
-#### How logging works in Azure Functions (Python)
-
-Python Azure Functions use an **out-of-process worker model**. Your Python code does **not** run inside the .NET Functions host — it runs in a separate Python process that communicates with the host over a **bidirectional gRPC stream**.
-
-```mermaid
-flowchart LR
-    subgraph python ["Python Worker Process"]
-        A["Your Code\nlogger.info(...)"] --> B["Python\nlogging module"]
-        C["httpx / requests\nSDK internals"] --> B
-        B -->|"level filter\n(INFO default)"| D["AsyncLoggingHandler"]
-        D -->|"maps level +\nsets category"| E["gRPC Response Queue"]
-    end
-
-    subgraph grpc ["gRPC Channel"]
-        E -->|"StreamingMessage\n(RpcLog)"| F["EventStream"]
-    end
-
-    subgraph dotnet [".NET Functions Host"]
-        F --> G["GrpcWorkerChannel\nDispatchMessage()"]
-        G -->|"User log"| H["Console +\nApp Insights"]
-        G -->|"System log"| I["Platform\nTelemetry"]
-    end
-```
-
-Here's what happens when you call `logger.info("hello")`:
-
-1. **Python `logging` module** — Your log record hits the standard Python logging pipeline. Level filtering happens here first — if a logger is set to `WARNING`, your `INFO` message is **dropped immediately** and never leaves the Python process.
-
-2. **`AsyncLoggingHandler`** — The Python worker installs its own `logging.Handler` on the root logger at startup ([source: `dispatcher.py`](https://github.com/Azure/azure-functions-python-worker/blob/main/azure_functions_worker/dispatcher.py)). This handler captures every log record that passes the level filter.
-
-3. **Level & category mapping** — The handler maps Python log levels to the gRPC `RpcLog.Level` enum (`DEBUG`→`Debug`, `INFO`→`Information`, `WARNING`→`Warning`, etc.) and classifies the log as **User** or **System** based on the logger name. Loggers named `azure_functions_worker.*` or `azure.functions.*` are System; everything else is User.
-
-4. **gRPC transport** — The `RpcLog` protobuf message is sent to the .NET host via the `FunctionRpc/EventStream` bidirectional stream.
-
-5. **.NET host routing** — The host's `GrpcWorkerChannel` dispatches the message:
-   - **User logs** → your configured `ILogger` sinks (local console, Application Insights)
-   - **System logs** → platform telemetry only (you won't see these in App Insights)
-
-#### Why logging must be configured in Python
-
-Because filtering happens **before** the gRPC hop, configuring log levels in the Python code is essential:
-
-- **The Python worker sets the root logger to `INFO` by default.** Any `DEBUG` messages are discarded in the Python process — the .NET host never sees them. That's why `log_setup.py` lets you set `LOG_LEVEL=DEBUG` to change this.
-
-- **Noisy libraries flood the gRPC channel.** Libraries like the Azure SDK, httpx, and urllib3 emit verbose logs at `DEBUG`/`INFO`. Without suppressing them in Python, every single log record would be serialized to protobuf, sent over gRPC, deserialized in C#, and pushed to Application Insights — wasting CPU, network, and ingestion cost. That's why `log_setup.py` sets these to `WARNING` by default.
-
-- **Logger names determine visibility.** If you accidentally use a logger named `azure.functions.something`, your logs get classified as System logs and won't appear in your Application Insights. Using your own logger name (like `function_app`) ensures they're treated as User logs.
-
-- **`LOGLEVEL_` overrides give runtime control** without code changes — dial up `LOGLEVEL_HTTPX=DEBUG` to troubleshoot HTTP issues, then set it back to `WARNING` in production.
-
-#### Setup
-
-The project includes a structured logging setup ([`log_setup.py`](./log_setup.py)) that is initialized once at the top of `function_app.py`:
-
-```python
-from log_setup import setup_logging
-logger = setup_logging("function_app")
-```
-
-This configures the root logger with a clean format, silences noisy library loggers (Azure SDK, httpx, gRPC, etc.) to WARNING by default, and returns a ready-to-use logger.
-
-#### General environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `LOG_LEVEL` | `INFO` | Root log level for your application code |
-| `LOG_FORMAT` | `%(asctime)s [%(levelname).1s] %(name)s: %(message)s` | Log format string |
-| `LOG_DATE_FORMAT` | `%H:%M:%S` | Date format string |
-
-#### Per-logger level overrides (`LOGLEVEL_`)
-
-You can override the log level of any Python logger at runtime using environment variables with the `LOGLEVEL_` prefix. The convention is:
-
-```
-LOGLEVEL_<LOGGER_NAME>=<LEVEL>
-```
-
-- **Underscores become dots** in the logger name (e.g. `AZURE_CORE` → `azure.core`)
-- **Case-insensitive** for both name and level
-- **Valid levels:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
-- **Invalid values** emit a Python warning and are skipped
-
-Examples:
-
-| Environment variable | Effect |
-|---|---|
-| `LOGLEVEL_HTTPX=INFO` | Sets `httpx` logger to INFO |
-| `LOGLEVEL_REQUESTS=DEBUG` | Sets `requests` logger to DEBUG |
-| `LOGLEVEL_AZURE_CORE=WARNING` | Sets `azure.core` logger to WARNING |
-| `LOGLEVEL_AZURE_STORAGE_BLOB=ERROR` | Sets `azure.storage.blob` logger to ERROR |
-
-These overrides have the highest priority — they are applied after the built-in noisy-logger defaults, so you can always dial up verbosity for debugging and dial it back down for production.
-
-For local development, set them in `local.settings.json`:
-
-```json
-{
-    "IsEncrypted": false,
-    "Values": {
-        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-        "FUNCTIONS_WORKER_RUNTIME": "python",
-        "LOGLEVEL_HTTPX": "INFO",
-        "LOGLEVEL_REQUESTS": "INFO"
-    }
-}
-```
-
-For Azure deployments, the same variables are configured as app settings in [`infra/main.bicep`](./infra/main.bicep).
-
-### HTTP requests with httpx and requests
-
-The `httpget` function includes demo HTTP calls using both [httpx](https://www.python-httpx.org/) and [requests](https://docs.python-requests.org/) to compare logging behaviour side by side:
-
-```python
-# httpx
-with httpx.Client(timeout=5) as client:
-    resp = client.get(url)
-    logger.info("httpx  %s → %s", url, resp.status_code)
-
-# requests
-resp = requests.get(url, timeout=5)
-logger.info("requests %s → %s", url, resp.status_code)
-```
-
-Use `LOGLEVEL_HTTPX=DEBUG` or `LOGLEVEL_REQUESTS=DEBUG` to see detailed internal logs from each library.
-
-### Function endpoints
 
 This code shows an HTTP GET triggered function:  
 
