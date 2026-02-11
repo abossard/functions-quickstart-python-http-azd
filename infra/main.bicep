@@ -119,6 +119,11 @@ module api './app/api.bicep' = {
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
+      // Per-logger log level overrides (LOGLEVEL_<name> where underscores become dots)
+      LOGLEVEL_HTTPX: 'INFO'
+      LOGLEVEL_HTTPCORE: 'INFO'
+      LOGLEVEL_AZURE_CORE: 'WARNING'
+      LOGLEVEL_AZURE_IDENTITY: 'WARNING'
     }
     virtualNetworkSubnetId: vnetEnabled ? serviceVirtualNetwork.outputs.appSubnetID : ''
   }

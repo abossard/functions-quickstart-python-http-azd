@@ -1,5 +1,9 @@
 import azure.functions as func
-import logging
+import httpx
+
+from log_setup import setup_logging
+
+logger = setup_logging("function_app")
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -7,7 +11,22 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 def http_get(req: func.HttpRequest) -> func.HttpResponse:
     name = req.params.get("name", "World")
 
-    logging.info(f"Processing GET request. Name: {name}")
+    logger.info(f"Processing GET request. Name: {name}")
+
+    # --- demo HTTP calls to show logging in action ------------------------
+    urls = [
+        "https://httpbin.org/get",
+        "https://httpbin.org/status/404",
+        "https://httpbin.org/delay/1",
+    ]
+    with httpx.Client(timeout=5) as client:
+        for url in urls:
+            try:
+                logger.debug("Requesting %s", url)
+                resp = client.get(url)
+                logger.info("%s → %s", url, resp.status_code)
+            except httpx.HTTPError as exc:
+                logger.warning("Request to %s failed: %s", url, exc)
 
     return func.HttpResponse(f"Hello, {name}!")
 
@@ -18,7 +37,7 @@ def http_post(req: func.HttpRequest) -> func.HttpResponse:
         name = req_body.get('name')
         age = req_body.get('age')
         
-        logging.info(f"Processing POST request. Name: {name}")
+        logger.info(f"Processing POST request. Name: {name}")
 
         if name and isinstance(name, str) and age and isinstance(age, int):
             return func.HttpResponse(f"Hello, {name}! You are {age} years old!")
