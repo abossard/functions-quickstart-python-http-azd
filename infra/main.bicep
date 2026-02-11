@@ -121,7 +121,7 @@ module api './app/api.bicep' = {
     appSettings: {
       // Per-logger log level overrides (LOGLEVEL_<name> where underscores become dots)
       LOGLEVEL_HTTPX: 'INFO'
-      LOGLEVEL_HTTPCORE: 'INFO'
+      LOGLEVEL_REQUESTS: 'INFO'
       LOGLEVEL_AZURE_CORE: 'WARNING'
       LOGLEVEL_AZURE_IDENTITY: 'WARNING'
     }

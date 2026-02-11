@@ -62,7 +62,7 @@ Add a file named `local.settings.json` in the root of your project with the foll
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "LOGLEVEL_HTTPX": "INFO",
-    "LOGLEVEL_HTTPCORE": "INFO"
+    "LOGLEVEL_REQUESTS": "INFO"
     }
 }
 ```
@@ -155,7 +155,7 @@ Examples:
 | Environment variable | Effect |
 |---|---|
 | `LOGLEVEL_HTTPX=INFO` | Sets `httpx` logger to INFO |
-| `LOGLEVEL_HTTPCORE=DEBUG` | Sets `httpcore` logger to DEBUG |
+| `LOGLEVEL_REQUESTS=DEBUG` | Sets `requests` logger to DEBUG |
 | `LOGLEVEL_AZURE_CORE=WARNING` | Sets `azure.core` logger to WARNING |
 | `LOGLEVEL_AZURE_STORAGE_BLOB=ERROR` | Sets `azure.storage.blob` logger to ERROR |
 
@@ -170,29 +170,29 @@ For local development, set them in `local.settings.json`:
         "AzureWebJobsStorage": "UseDevelopmentStorage=true",
         "FUNCTIONS_WORKER_RUNTIME": "python",
         "LOGLEVEL_HTTPX": "INFO",
-        "LOGLEVEL_HTTPCORE": "INFO"
+        "LOGLEVEL_REQUESTS": "INFO"
     }
 }
 ```
 
 For Azure deployments, the same variables are configured as app settings in [`infra/main.bicep`](./infra/main.bicep).
 
-### HTTP requests with httpx
+### HTTP requests with httpx and requests
 
-The `httpget` function includes demo HTTP calls using [httpx](https://www.python-httpx.org/) to show logging at different levels:
+The `httpget` function includes demo HTTP calls using both [httpx](https://www.python-httpx.org/) and [requests](https://docs.python-requests.org/) to compare logging behaviour side by side:
 
 ```python
+# httpx
 with httpx.Client(timeout=5) as client:
-    for url in urls:
-        try:
-            logger.debug("Requesting %s", url)
-            resp = client.get(url)
-            logger.info("%s → %s", url, resp.status_code)
-        except httpx.HTTPError as exc:
-            logger.warning("Request to %s failed: %s", url, exc)
+    resp = client.get(url)
+    logger.info("httpx  %s → %s", url, resp.status_code)
+
+# requests
+resp = requests.get(url, timeout=5)
+logger.info("requests %s → %s", url, resp.status_code)
 ```
 
-Set `LOGLEVEL_HTTPX=DEBUG` to see detailed request/response logs from httpx itself.
+Use `LOGLEVEL_HTTPX=DEBUG` or `LOGLEVEL_REQUESTS=DEBUG` to see detailed internal logs from each library.
 
 ### Function endpoints
 

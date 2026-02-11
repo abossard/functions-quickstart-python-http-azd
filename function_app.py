@@ -1,5 +1,6 @@
 import azure.functions as func
 import httpx
+import requests
 
 from log_setup import setup_logging
 
@@ -13,20 +14,25 @@ def http_get(req: func.HttpRequest) -> func.HttpResponse:
 
     logger.info(f"Processing GET request. Name: {name}")
 
-    # --- demo HTTP calls to show logging in action ------------------------
-    urls = [
-        "https://httpbin.org/get",
-        "https://httpbin.org/status/404",
-        "https://httpbin.org/delay/1",
-    ]
-    with httpx.Client(timeout=5) as client:
-        for url in urls:
-            try:
-                logger.debug("Requesting %s", url)
-                resp = client.get(url)
-                logger.info("%s → %s", url, resp.status_code)
-            except httpx.HTTPError as exc:
-                logger.warning("Request to %s failed: %s", url, exc)
+    # --- demo HTTP calls with both httpx and requests ---------------------
+    url = "https://httpbin.org/get"
+
+    # httpx
+    logger.info("--- httpx ---")
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(url)
+            logger.info("httpx  %s → %s", url, resp.status_code)
+    except httpx.HTTPError as exc:
+        logger.warning("httpx  request failed: %s", exc)
+
+    # requests
+    logger.info("--- requests ---")
+    try:
+        resp = requests.get(url, timeout=5)
+        logger.info("requests %s → %s", url, resp.status_code)
+    except requests.RequestException as exc:
+        logger.warning("requests request failed: %s", exc)
 
     return func.HttpResponse(f"Hello, {name}!")
 
